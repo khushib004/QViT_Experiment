@@ -1,0 +1,30 @@
+# Default hyper-parameter config for the TyreNet QViT benchmark.
+data:
+  root: ./data/tyrenet           # expects root/{good,defective}/*.jpg
+  patch_size: 32                 # 224/32 = 7x7 = 49 patches for quantum view
+  reducer: conv                  # 'conv' or 'pca'
+  n_qubits: 4                    # 4-8 recommended for lightning.gpu
+
+train:
+  epochs: 10
+  batch_size: 16
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  workers: 2
+
+models:
+  qvit:
+    depth: 4
+    embed_dim: 96
+    n_heads: 2
+    n_layers: 2                  # variational ansatz depth (BasicEntanglerLayers)
+  qcnn:
+    n_layers: 2
+
+distillation:
+  enabled: true
+  temperature: 4.0
+  alpha: 0.5
+
+quantum:
+  device: lightning.qubit        # switch to 'lightning.gpu' on Colab w/ CUDA
