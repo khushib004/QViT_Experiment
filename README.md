@@ -21,25 +21,43 @@ classical ViT-Tiny.
 ```
 src/
   data/tyrenet_dataset.py   Dual-resolution Dataset (224x224 + per-patch quantum features)
-  models/quantum_attention  HybridQuantumMultiHeadAttention (VQC-based QSA)
+  models/quantum_attention  HybridQuantumMultiHeadAttention (VQC-based QSA, attn capture)
   models/qvit.py            QViT (ViT w/ QSA blocks)
-  models/qcnn.py            Quanvolutional CNN
-  models/classical_vit.py   ViT-Tiny reference
-  models/classical_cnn.py   3-layer CNN baseline
-  training/trainer.py       Supervised + Knowledge-Distillation loops
+  models/qcnn.py            Quanvolutional CNN (exposes per-qubit feature maps)
+  models/classical_vit.py   ViT-Tiny w/ attention-weight capture
+  models/classical_cnn.py   3-layer CNN baseline (Grad-CAM hooks)
+  training/trainer.py       Supervised + KD loops, quantum warm-up, best-ckpt
+  explain/gradcam.py        Grad-CAM for CNN / QCNN
+  explain/attention_rollout Attention rollout for ViT / QViT
+  explain/overlay.py        Heatmap overlays + 4-model comparison + defect-focus
+  explain/embeddings.py     t-SNE / PCA of learned feature space
+  explain/quantum_viz.py    Circuit drawing, Bloch spheres, expressivity curve
+  utils/metrics.py          Confusion / ROC-PR / Pareto frontier
   utils/flops.py            Classical FLOPs counter
   utils/plots.py            Acc-vs-params / Acc-vs-epochs / FLOPs-vs-gates plots
-scripts/benchmark.py        End-to-end benchmark entrypoint
+scripts/benchmark.py        End-to-end benchmark + full evidence suite
+notebooks/QViT_TyreNet_Benchmark.ipynb   Narrated Colab walkthrough
 configs/default.yaml        Reference hyper-parameter file
 ```
 
 ## Quantum design
 
-* State preparation: `qml.AngleEmbedding(rotation="Y")` on reduced features
-  (tanh-squashed to keep them in the AngleEmbedding-friendly range).
-* Variational ansatz: `qml.BasicEntanglerLayers` (RX layers + ring of CNOTs).
+* State preparation: `qml.AngleEmbedding(rotation="Y")` on reduced features,
+  tanh-scaled to the maximally-expressive `[-pi, pi]` range.
+* Variational ansatz: `BasicEntanglerLayers` (default) or `StronglyEntanglingLayers`,
+  with optional **data re-uploading** (Perez-Salinas 2020) for higher expressivity.
 * Output: per-wire `PauliZ` expectations.
 * Device: `lightning.qubit` by default; switch to `lightning.gpu` on Colab.
+
+## Evidence the benchmark produces
+
+* **`pareto_frontier.png`** — accuracy vs. #params with the efficiency frontier
+  (the parameter-efficiency proof).
+* **`saliency_compare_*.png`** — original | CNN | ViT | QCNN | QViT heatmap overlays
+  on real tyres, with a **defect-focus score** (does the model look at the flaw?).
+* **`embeddings_*.png`** — t-SNE of each model's learned features.
+* **`confusion_*.png`, `roc_pr.png`** — standard diagnostics.
+* **`acc_vs_*.png`, `flops_vs_gates.png`** — convergence + compute footprint.
 
 ## Quickstart (Google Colab)
 

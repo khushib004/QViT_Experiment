@@ -219,7 +219,12 @@ class TyreNetDataset(Dataset):
         path, label = self.samples[index]
         img = Image.open(path).convert("RGB")
         x_cls = self.classical_tf(img)
-        item = {"image_classical": x_cls, "label": torch.tensor(label, dtype=torch.long)}
+        item = {
+            "image_classical": x_cls,
+            "label": torch.tensor(label, dtype=torch.long),
+            "path": path,
+            "index": index,
+        }
         if self.return_quantum:
             item["image_quantum"] = self.reducer(x_cls)  # (P, n_qubits)
         return item

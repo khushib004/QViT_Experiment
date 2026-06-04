@@ -1,27 +1,28 @@
 """
-Hybrid Quantum Self-Attention (QSA) head for Quantum Vision Transformers.
+Hybrid Quantum Self-Attention (QSA) for Quantum Vision Transformers.
 
-Theoretical basis:
-    - Cherrat et al. (2024): Quantum Vision Transformers, showing O(n) parameter
-      scaling of QSA compared to O(n^2) of classical self-attention.
-    - Boucher et al. (2025): on the inductive bias of variational quantum
-      attention for global feature extraction.
+Theory
+------
+Classical Multi-Head Self-Attention learns three D x D projection matrices
+(W_Q, W_K, W_V) per head -> 3*D^2 parameters, i.e. O(D^2). Quantum Self-
+Attention replaces each projection with a per-token Variational Quantum
+Circuit (VQC) whose only trainable tensor scales as O(n_qubits) (Cherrat
+et al. 2024; Boucher et al. 2025).
 
-Design:
-    Each attention head is realized by a Variational Quantum Circuit (VQC):
-        1. AngleEmbedding maps a token's reduced feature vector (size = n_qubits)
-           to single-qubit rotations (state preparation).
-        2. BasicEntanglerLayers provides a hardware-efficient ansatz that
-           entangles qubits across CNOT rings (variational ansatz).
-        3. Pauli-Z expectations on each wire produce the per-token output
-           of size n_qubits (the "value-attended" representation).
+Circuit (per token)
+-------------------
+  1. State prep:  AngleEmbedding(R_Y) of the n_qubits reduced features.
+  2. Ansatz:      BasicEntanglerLayers OR StronglyEntanglingLayers, with
+                  optional *data re-uploading* (Perez-Salinas 2020) that
+                  re-embeds the input before every variational layer to
+                  boost expressivity at fixed qubit count.
+  3. Readout:     <Z_i> on each wire -> n_qubits-dim per-token vector.
 
-    Multi-head behaviour is achieved by replicating the circuit with different
-    trainable parameters and concatenating outputs along the feature axis.
-
-    Classical pre-projections (q_proj, k_proj, v_proj) compress the embedding
-    dim D to n_qubits so that the quantum register stays small (4-8 qubits) —
-    critical for tractable simulation on `lightning.gpu`.
+Explainability
+--------------
+Every attention module caches its last attention matrix in `.last_attn`
+(shape (B, heads, N, N)). This is consumed by attention-rollout to render
+"where the model looks" heatmaps over the original tyre image.
 """
 from __future__ import annotations
 
@@ -34,56 +35,81 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def _build_qnode(n_qubits: int, n_layers: int, device_name: str = "lightning.qubit"):
-    """Construct a PennyLane QNode wired to a TorchLayer-friendly interface."""
+# --------------------------------------------------------------------------- #
+# QNode construction
+# --------------------------------------------------------------------------- #
+def _build_qnode(
+    n_qubits: int,
+    n_layers: int,
+    device_name: str = "lightning.qubit",
+    ansatz: str = "basic",
+    reupload: bool = True,
+):
+    """Build a TorchLayer-compatible QNode.
+
+    ansatz:    'basic' -> BasicEntanglerLayers (1 param/qubit/layer)
+               'strong' -> StronglyEntanglingLayers (3 params/qubit/layer)
+    reupload:  re-embed the input before each variational layer.
+    """
     dev = qml.device(device_name, wires=n_qubits)
+
+    if ansatz == "strong":
+        weight_shape = (n_layers, n_qubits, 3)
+        ansatz_fn = qml.StronglyEntanglingLayers
+    else:
+        weight_shape = (n_layers, n_qubits)
+        ansatz_fn = qml.BasicEntanglerLayers
 
     @qml.qnode(dev, interface="torch", diff_method="adjoint")
     def circuit(inputs, weights):
-        # State preparation: angle-embed reduced features as RY rotations.
-        qml.AngleEmbedding(inputs, wires=range(n_qubits), rotation="Y")
-        # Variational ansatz: BasicEntanglerLayers (RX + ring of CNOTs).
-        qml.BasicEntanglerLayers(weights, wires=range(n_qubits))
-        # Measure each wire to get an n_qubits-dimensional output.
+        if reupload:
+            # Interleave embedding and one variational layer at a time.
+            for layer in range(n_layers):
+                qml.AngleEmbedding(inputs, wires=range(n_qubits), rotation="Y")
+                ansatz_fn(weights[layer : layer + 1], wires=range(n_qubits))
+        else:
+            qml.AngleEmbedding(inputs, wires=range(n_qubits), rotation="Y")
+            ansatz_fn(weights, wires=range(n_qubits))
         return [qml.expval(qml.PauliZ(w)) for w in range(n_qubits)]
 
-    return circuit
+    return circuit, weight_shape
 
 
 class QuantumLinear(nn.Module):
-    """A token-wise quantum 'projection' realized by a TorchLayer over a VQC.
+    """Token-wise quantum 'projection': one VQC applied to every token.
 
-    Applies the same VQC independently to every token in a (B, N, n_qubits)
-    tensor. The TorchLayer is registered with a single weight tensor of shape
-    (n_layers, n_qubits), giving the O(n) parameter scaling claimed by QSA.
+    Input/Output: (B, N, n_qubits). The single registered weight tensor gives
+    the O(n_qubits) scaling at the heart of the QSA efficiency claim.
     """
 
-    def __init__(self, n_qubits: int, n_layers: int = 2, device_name: str = "lightning.qubit"):
+    def __init__(
+        self,
+        n_qubits: int,
+        n_layers: int = 2,
+        device_name: str = "lightning.qubit",
+        ansatz: str = "basic",
+        reupload: bool = True,
+    ):
         super().__init__()
         self.n_qubits = n_qubits
         self.n_layers = n_layers
-        qnode = _build_qnode(n_qubits, n_layers, device_name)
-        weight_shapes = {"weights": (n_layers, n_qubits)}
-        self.qlayer = qml.qnn.TorchLayer(qnode, weight_shapes)
+        qnode, weight_shape = _build_qnode(n_qubits, n_layers, device_name, ansatz, reupload)
+        self.qlayer = qml.qnn.TorchLayer(qnode, {"weights": weight_shape})
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, N, n_qubits) -> flatten tokens, apply VQC, restore shape.
         B, N, D = x.shape
-        assert D == self.n_qubits, f"Expected last dim={self.n_qubits}, got {D}"
-        flat = x.reshape(B * N, D)
-        out = self.qlayer(flat)
+        assert D == self.n_qubits, f"expected last dim {self.n_qubits}, got {D}"
+        out = self.qlayer(x.reshape(B * N, D))
         return out.reshape(B, N, D)
 
 
 class QuantumSelfAttentionHead(nn.Module):
-    """A single QSA head.
+    """A single quantum self-attention head.
 
-    The classical projections (q/k/v) compress embed_dim -> n_qubits so the
-    quantum register remains small. Q and K are mapped through independent
-    VQCs; the resulting Q,K are used to compute classical scaled dot-product
-    attention weights. V is also processed by a quantum 'value' layer, giving
-    a fully quantum-feature pipeline while keeping the softmax classical
-    (the only practical option on NISQ hardware).
+    Classical projections compress embed_dim -> n_qubits (kept small so the
+    register is simulable). Q, K, V each pass through their own VQC; attention
+    weights are the classical scaled dot-product softmax of the quantum Q, K.
+    The per-head attention matrix is exposed for visualization.
     """
 
     def __init__(
@@ -92,44 +118,49 @@ class QuantumSelfAttentionHead(nn.Module):
         n_qubits: int = 4,
         n_layers: int = 2,
         device_name: str = "lightning.qubit",
+        ansatz: str = "basic",
+        reupload: bool = True,
         dropout: float = 0.0,
     ):
         super().__init__()
-        self.embed_dim = embed_dim
         self.n_qubits = n_qubits
         self.scale = 1.0 / math.sqrt(n_qubits)
 
-        self.q_proj = nn.Linear(embed_dim, n_qubits, bias=False)
-        self.k_proj = nn.Linear(embed_dim, n_qubits, bias=False)
-        self.v_proj = nn.Linear(embed_dim, n_qubits, bias=False)
+        # Small bottleneck MLPs give the VQC cleaner inputs than a bare linear.
+        def proj():
+            return nn.Sequential(
+                nn.Linear(embed_dim, embed_dim // 2),
+                nn.GELU(),
+                nn.Linear(embed_dim // 2, n_qubits),
+            )
 
-        self.q_vqc = QuantumLinear(n_qubits, n_layers, device_name)
-        self.k_vqc = QuantumLinear(n_qubits, n_layers, device_name)
-        self.v_vqc = QuantumLinear(n_qubits, n_layers, device_name)
-
+        self.q_proj, self.k_proj, self.v_proj = proj(), proj(), proj()
+        qkw = dict(n_qubits=n_qubits, n_layers=n_layers, device_name=device_name,
+                   ansatz=ansatz, reupload=reupload)
+        self.q_vqc = QuantumLinear(**qkw)
+        self.k_vqc = QuantumLinear(**qkw)
+        self.v_vqc = QuantumLinear(**qkw)
         self.attn_drop = nn.Dropout(dropout)
+        self.last_attn: Optional[torch.Tensor] = None  # (B, N, N)
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        # x: (B, N, embed_dim)
-        q = self.q_vqc(torch.tanh(self.q_proj(x)))  # tanh keeps inputs in [-1,1] for AngleEmbedding
-        k = self.k_vqc(torch.tanh(self.k_proj(x)))
-        v = self.v_vqc(torch.tanh(self.v_proj(x)))
+        # tanh*pi keeps AngleEmbedding inputs in the maximally expressive [-pi, pi].
+        q = self.q_vqc(torch.tanh(self.q_proj(x)) * math.pi)
+        k = self.k_vqc(torch.tanh(self.k_proj(x)) * math.pi)
+        v = self.v_vqc(torch.tanh(self.v_proj(x)) * math.pi)
 
-        attn_logits = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        logits = torch.matmul(q, k.transpose(-2, -1)) * self.scale
         if mask is not None:
-            attn_logits = attn_logits.masked_fill(mask == 0, float("-inf"))
-        attn = self.attn_drop(F.softmax(attn_logits, dim=-1))
-        return torch.matmul(attn, v)  # (B, N, n_qubits)
+            logits = logits.masked_fill(mask == 0, float("-inf"))
+        attn = F.softmax(logits, dim=-1)
+        self.last_attn = attn.detach()
+        return torch.matmul(self.attn_drop(attn), v)  # (B, N, n_qubits)
 
 
 class HybridQuantumMultiHeadAttention(nn.Module):
-    """Multi-head wrapper that concatenates QSA heads and projects back to embed_dim.
+    """Multi-head QSA: concatenate heads, project back to embed_dim.
 
-    Trainable-parameter budget is approximately:
-        n_heads * (3 * embed_dim * n_qubits + 3 * n_layers * n_qubits)
-                + (n_heads * n_qubits) * embed_dim
-    which is linear in n_qubits inside the quantum block — the O(n) scaling
-    discussed in Cherrat et al. (2024).
+    Caches `.last_attn` as (B, n_heads, N, N) for attention rollout.
     """
 
     def __init__(
@@ -139,40 +170,49 @@ class HybridQuantumMultiHeadAttention(nn.Module):
         n_qubits: int = 4,
         n_layers: int = 2,
         device_name: str = "lightning.qubit",
+        ansatz: str = "basic",
+        reupload: bool = True,
         dropout: float = 0.0,
     ):
         super().__init__()
         self.heads = nn.ModuleList(
             [
                 QuantumSelfAttentionHead(
-                    embed_dim=embed_dim,
-                    n_qubits=n_qubits,
-                    n_layers=n_layers,
-                    device_name=device_name,
-                    dropout=dropout,
+                    embed_dim, n_qubits, n_layers, device_name, ansatz, reupload, dropout
                 )
                 for _ in range(n_heads)
             ]
         )
         self.out_proj = nn.Linear(n_heads * n_qubits, embed_dim)
         self.proj_drop = nn.Dropout(dropout)
+        self.last_attn: Optional[torch.Tensor] = None
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        head_outs = [h(x, mask=mask) for h in self.heads]
-        concat = torch.cat(head_outs, dim=-1)  # (B, N, n_heads * n_qubits)
-        return self.proj_drop(self.out_proj(concat))
+        outs = [h(x, mask=mask) for h in self.heads]
+        self.last_attn = torch.stack([h.last_attn for h in self.heads], dim=1)  # (B, H, N, N)
+        return self.proj_drop(self.out_proj(torch.cat(outs, dim=-1)))
 
 
-def estimate_gate_count(n_qubits: int, n_layers: int, n_tokens: int, n_heads: int) -> dict:
-    """Rough quantum-gate accounting for one forward pass (per batch element).
-
-    AngleEmbedding contributes n_qubits single-qubit rotations.
-    BasicEntanglerLayers contributes n_layers * (n_qubits RX + n_qubits CNOTs).
-    Applied per-token, per-head, for Q, K, V projections (3x).
-    """
-    per_circuit_1q = n_qubits + n_layers * n_qubits
-    per_circuit_2q = n_layers * n_qubits  # ring CNOTs
-    circuits = 3 * n_heads * n_tokens  # Q, K, V
+def estimate_gate_count(
+    n_qubits: int,
+    n_layers: int,
+    n_tokens: int,
+    n_heads: int,
+    ansatz: str = "basic",
+    reupload: bool = True,
+) -> dict:
+    """Analytical per-batch-element gate budget for one attention forward pass."""
+    embeds = n_layers if reupload else 1
+    embed_1q = embeds * n_qubits  # R_Y rotations
+    if ansatz == "strong":
+        ansatz_1q = n_layers * n_qubits * 3
+        ansatz_2q = n_layers * n_qubits  # ring of CNOTs
+    else:
+        ansatz_1q = n_layers * n_qubits
+        ansatz_2q = n_layers * n_qubits
+    per_circuit_1q = embed_1q + ansatz_1q
+    per_circuit_2q = ansatz_2q
+    circuits = 3 * n_heads * n_tokens  # Q, K, V per head per token
     return {
         "single_qubit_gates": per_circuit_1q * circuits,
         "two_qubit_gates": per_circuit_2q * circuits,

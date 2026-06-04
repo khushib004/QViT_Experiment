@@ -1,13 +1,13 @@
 """Hybrid Quantum CNN ('Quanvolutional' architecture, Henderson et al., 2019).
 
-A Quanvolutional layer slides a small VQC over local image patches and
-emits one feature map per measured qubit. We follow the original recipe:
-  - 2x2 stride-2 patches (so 4 input pixels feed n_qubits>=4)
-  - AngleEmbedding + BasicEntanglerLayers as the kernel
-  - Per-wire PauliZ expectations form the output channels
+A Quanvolutional layer slides a small VQC over local 2x2 image patches and
+emits one feature map per measured qubit:
+  - 2x2 stride-2 patches feed n_qubits>=4
+  - AngleEmbedding(R_Y) + BasicEntanglerLayers kernel
+  - per-wire <Z> form the output channels
 
-To stay tractable on a simulator we expect the *grayscale* of the image
-downsampled to 28x28; the rest of the network is a small CNN classifier.
+The quantum feature maps are *themselves* directly visualizable (one heatmap
+per qubit), and the classifier's last conv is a Grad-CAM target.
 """
 from __future__ import annotations
 
@@ -38,22 +38,21 @@ class QuanvLayer(nn.Module):
         self.n_qubits = n_qubits
         qnode = _quanv_qnode(n_qubits, n_layers, device_name)
         self.qlayer = qml.qnn.TorchLayer(qnode, {"weights": (n_layers, n_qubits)})
+        self.last_quantum_maps = None  # (B, n_qubits, H', W') cached for viz
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, 1, H, W), values roughly in [-pi, pi] (we'll squash w/ tanh*pi)
         B, _, H, W = x.shape
-        x = torch.tanh(x) * 3.14159
+        x = torch.tanh(x) * 3.14159265
         patches = F.unfold(x, kernel_size=2, stride=2)  # (B, 4, L)
         L = patches.shape[-1]
-        # pad to n_qubits if needed
         if patches.shape[1] < self.n_qubits:
             pad = torch.zeros(B, self.n_qubits - patches.shape[1], L, device=x.device)
             patches = torch.cat([patches, pad], dim=1)
         flat = patches.permute(0, 2, 1).reshape(B * L, self.n_qubits)
-        out = self.qlayer(flat)
-        out = out.reshape(B, L, self.n_qubits).permute(0, 2, 1)
-        Hn, Wn = H // 2, W // 2
-        return out.reshape(B, self.n_qubits, Hn, Wn)
+        out = self.qlayer(flat).reshape(B, L, self.n_qubits).permute(0, 2, 1)
+        maps = out.reshape(B, self.n_qubits, H // 2, W // 2)
+        self.last_quantum_maps = maps.detach()
+        return maps
 
 
 class QCNN(nn.Module):
@@ -75,17 +74,33 @@ class QCNN(nn.Module):
             p.requires_grad_(False)
 
         self.quanv = QuanvLayer(n_qubits=n_qubits, n_layers=n_layers, device_name=device_name)
-        self.classifier = nn.Sequential(
-            nn.Conv2d(n_qubits, 32, 3, padding=1), nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-            nn.Conv2d(32, 64, 3, padding=1), nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(64, num_classes),
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(n_qubits, 32, 3, padding=1), nn.ReLU(inplace=True), nn.MaxPool2d(2),
         )
+        # Grad-CAM target.
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(32, 64, 3, padding=1), nn.ReLU(inplace=True),
+        )
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.classifier = nn.Linear(64, num_classes)
+        self._feature_maps = None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    @property
+    def gradcam_layer(self) -> nn.Module:
+        return self.conv2
+
+    def forward_features(self, x):
         x = F.interpolate(x, size=(self.input_size, self.input_size), mode="bilinear", align_corners=False)
         x = self.to_gray(x)
         x = self.quanv(x)
-        return self.classifier(x)
+        h = self.conv2(self.conv1(x))
+        self._feature_maps = h
+        return h
+
+    def forward(self, x):
+        h = self.forward_features(x)
+        return self.classifier(self.pool(h).flatten(1))
+
+    @torch.no_grad()
+    def embed(self, x):
+        return self.pool(self.forward_features(x)).flatten(1)
