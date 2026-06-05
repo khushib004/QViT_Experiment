@@ -1,8 +1,8 @@
 # QViT Benchmark for Tyre Defect Detection
 
 Comparative study of four vision architectures for Apollo-Tyres-style
-industrial quality control on the **TyreNet** dataset (Mendeley, ~1,700
-images of good vs. defective tyres):
+industrial quality control on the [**Tyre Quality Classification dataset**](https://www.kaggle.com/datasets/warcoder/tyre-quality-classification)
+(Kaggle, ~1,854 real images of *good* vs. *defective* tyres):
 
 | Model | Description |
 |-------|-------------|
@@ -29,12 +29,13 @@ src/
   training/trainer.py       Supervised + KD loops, quantum warm-up, best-ckpt
   explain/gradcam.py        Grad-CAM for CNN / QCNN
   explain/attention_rollout Attention rollout for ViT / QViT
-  explain/overlay.py        Heatmap overlays + 4-model comparison + defect-focus
+  explain/overlay.py        Heatmap overlays + 4-model comparison
   explain/embeddings.py     t-SNE / PCA of learned feature space
   explain/quantum_viz.py    Circuit drawing, Bloch spheres, expressivity curve
   utils/metrics.py          Confusion / ROC-PR / Pareto frontier
   utils/flops.py            Classical FLOPs counter
   utils/plots.py            Acc-vs-params / Acc-vs-epochs / FLOPs-vs-gates plots
+scripts/download_data.py    Kaggle dataset downloader (warcoder/tyre-quality-classification)
 scripts/benchmark.py        End-to-end benchmark + full evidence suite
 notebooks/QViT_TyreNet_Benchmark.ipynb   Narrated Colab walkthrough
 configs/default.yaml        Reference hyper-parameter file
@@ -54,30 +55,50 @@ configs/default.yaml        Reference hyper-parameter file
 * **`pareto_frontier.png`** — accuracy vs. #params with the efficiency frontier
   (the parameter-efficiency proof).
 * **`saliency_compare_*.png`** — original | CNN | ViT | QCNN | QViT heatmap overlays
-  on real tyres, with a **defect-focus score** (does the model look at the flaw?).
+  on real tyres (Grad-CAM for CNN/QCNN, gradient-weighted attention rollout for ViT/QViT).
 * **`embeddings_*.png`** — t-SNE of each model's learned features.
 * **`confusion_*.png`, `roc_pr.png`** — standard diagnostics.
 * **`acc_vs_*.png`, `flops_vs_gates.png`** — convergence + compute footprint.
 
-## Quickstart (Google Colab)
+## Quickstart
 
-```python
-!pip install -q pennylane "pennylane-lightning[gpu]" torch torchvision scikit-learn matplotlib
-!git clone <this repo> && cd QViT_Experiment
-# Layout your dataset as: ./data/tyrenet/good/*.jpg and ./data/tyrenet/defective/*.jpg
-!python scripts/benchmark.py \
+### 1. Kaggle authentication (one-time)
+The dataset is hosted on Kaggle and requires API credentials:
+
+* **Colab:** *Settings → Secrets* → add `KAGGLE_USERNAME` and `KAGGLE_KEY`
+  (from your Kaggle account → *Settings → API → Create New Token*).
+  Toggle "Notebook access" on for both.
+* **Desktop / VS Code:** Place `kaggle.json` at `~/.kaggle/kaggle.json`
+  (`chmod 600`), or export `KAGGLE_USERNAME` + `KAGGLE_KEY` env vars.
+
+### 2. Install + download
+```bash
+pip install -q pennylane "pennylane-lightning[gpu]" torch torchvision \
+                scikit-learn matplotlib kagglehub
+git clone https://github.com/khushib004/QViT_Experiment.git
+cd QViT_Experiment
+
+python scripts/download_data.py            # one-time, ~50 MB
+```
+
+### 3. Run the full benchmark
+```bash
+python scripts/benchmark.py \
     --data_root ./data/tyrenet \
-    --epochs 10 --batch_size 16 \
+    --epochs 20 --batch_size 16 \
     --n_qubits 4 --n_layers 2 --n_heads 2 \
     --qdevice lightning.gpu \
     --use_kd
 ```
 
+Or open `notebooks/QViT_TyreNet_Benchmark.ipynb` in Colab for the narrated walkthrough.
+
 Outputs:
-* `results/plots/acc_vs_params.png`
-* `results/plots/acc_vs_epochs.png`
-* `results/plots/flops_vs_gates.png`
-* `results/logs/benchmark.json` (full per-epoch history)
+* `results/plots/pareto_frontier.png` — the parameter-efficiency proof.
+* `results/plots/saliency_compare_*.png` — Grad-CAM / attention overlays.
+* `results/plots/embeddings_*.png` — t-SNE of learned features.
+* `results/plots/acc_vs_*.png`, `flops_vs_gates.png`, `confusion_*.png`, `roc_pr.png`.
+* `results/logs/benchmark.json` (full per-epoch history).
 
 ## Knowledge distillation
 
@@ -94,4 +115,4 @@ with $T=4$, $\alpha=0.5$ by default.
 * Boucher, P. et al. *Inductive bias of quantum attention.* (2025).
 * Henderson, M. et al. *Quanvolutional Neural Networks.* arXiv:1904.04767 (2019).
 * Hinton, G. et al. *Distilling the Knowledge in a Neural Network.* (2015).
-# QVit_Experiment
+* Chefer, H. et al. *Transformer Interpretability Beyond Attention Visualization.* CVPR (2021).
