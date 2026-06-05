@@ -94,3 +94,4 @@ with $T=4$, $\alpha=0.5$ by default.
 * Boucher, P. et al. *Inductive bias of quantum attention.* (2025).
 * Henderson, M. et al. *Quanvolutional Neural Networks.* arXiv:1904.04767 (2019).
 * Hinton, G. et al. *Distilling the Knowledge in a Neural Network.* (2015).
+# QVit_Experiment
