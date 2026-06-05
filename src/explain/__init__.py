@@ -1,4 +1,4 @@
-from .attention_rollout import attention_rollout
+from .attention_rollout import attention_rollout, gradient_attention_rollout
 from .embeddings import extract_embeddings, plot_embedding, project_2d
 from .gradcam import GradCAM
 from .overlay import (
@@ -17,6 +17,7 @@ from .saliency import model_saliency
 
 __all__ = [
     "attention_rollout",
+    "gradient_attention_rollout",
     "GradCAM",
     "model_saliency",
     "overlay_heatmap",
