@@ -41,15 +41,18 @@ class QuanvLayer(nn.Module):
         self.last_quantum_maps = None  # (B, n_qubits, H', W') cached for viz
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        device = x.device
         B, _, H, W = x.shape
         x = torch.tanh(x) * 3.14159265
         patches = F.unfold(x, kernel_size=2, stride=2)  # (B, 4, L)
         L = patches.shape[-1]
         if patches.shape[1] < self.n_qubits:
-            pad = torch.zeros(B, self.n_qubits - patches.shape[1], L, device=x.device)
+            pad = torch.zeros(B, self.n_qubits - patches.shape[1], L, device=device)
             patches = torch.cat([patches, pad], dim=1)
         flat = patches.permute(0, 2, 1).reshape(B * L, self.n_qubits)
-        out = self.qlayer(flat).reshape(B, L, self.n_qubits).permute(0, 2, 1)
+        # PennyLane's TorchLayer returns tensors on the simulator's device, which
+        # may be CPU even when the model lives on CUDA. Push back to input device.
+        out = self.qlayer(flat).to(device).reshape(B, L, self.n_qubits).permute(0, 2, 1)
         maps = out.reshape(B, self.n_qubits, H // 2, W // 2)
         self.last_quantum_maps = maps.detach()
         return maps

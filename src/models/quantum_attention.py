@@ -99,7 +99,9 @@ class QuantumLinear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, D = x.shape
         assert D == self.n_qubits, f"expected last dim {self.n_qubits}, got {D}"
-        out = self.qlayer(x.reshape(B * N, D))
+        # TorchLayer may return CPU tensors even when input is CUDA; ensure
+        # the output matches the input device so downstream layers don't fail.
+        out = self.qlayer(x.reshape(B * N, D)).to(x.device)
         return out.reshape(B, N, D)
 
 
