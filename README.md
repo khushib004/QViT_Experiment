@@ -1,6 +1,6 @@
 # QViT Benchmark for Tyre Defect Detection
 
-Comparative study of four vision architectures for Apollo-Tyres-style
+Comparative study of four vision architectures for ATL-style
 industrial quality control on the [**Tyre Quality Classification dataset**](https://www.kaggle.com/datasets/warcoder/tyre-quality-classification)
 (Kaggle, ~1,854 real images of *good* vs. *defective* tyres):
 
