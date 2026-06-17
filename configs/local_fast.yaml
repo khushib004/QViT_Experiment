@@ -1,0 +1,46 @@
+# Local / CPU fast mode — reduced settings so the full pipeline finishes
+# in ~20-40 minutes on a modern laptop without a GPU.
+#
+# Usage:
+#   python scripts/benchmark.py \
+#       --data_root ./data/tyrenet \
+#       --epochs 5 --batch_size 8 --workers 0 \
+#       --n_qubits 2 --n_layers 1 --n_heads 1 \
+#       --qvit_depth 2 --qvit_dim 64 --qvit_patch 32 \
+#       --qdevice default.qubit \
+#       --quantum_warmup 1 \
+#       --results_dir results/local_fast
+#
+# Notes:
+#   - default.qubit: PennyLane's pure-Python simulator; no CUDA needed.
+#   - 2 qubits instead of 4 cuts quantum forward time by ~4×.
+#   - depth 2 QViT with dim-64 has ~200 K params vs ~1.5 M for the full run.
+#   - Omit --use_kd to skip distillation (saves another full ViT forward pass
+#     per QViT batch); add it back once you've confirmed the run is stable.
+
+data:
+  root: ./data/tyrenet
+  kaggle_slug: warcoder/tyre-quality-classification
+  patch_size: 32
+  reducer: conv
+  n_qubits: 2          # 2 qubits: much faster than 4, still expressive
+
+train:
+  epochs: 5            # proof-of-concept; bump to 20 for final results
+  batch_size: 8
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  workers: 0           # set to 0 on Windows to avoid multiprocessing issues
+  quantum_warmup: 1
+
+models:
+  qvit:
+    depth: 2           # 2 transformer blocks instead of 4
+    embed_dim: 64      # smaller than 96 in full config
+    n_heads: 1
+    n_layers: 1        # 1 VQC layer per head
+  qcnn:
+    n_layers: 1
+
+quantum:
+  device: default.qubit   # pure-Python PennyLane sim; swap to lightning.qubit for speed
